@@ -8,10 +8,13 @@
 //0x00: (253)V1.2___ (V1.0____) _=0x20
 //0x42: 0 (sensor reading) (0)
 //0x42: ChEN (3210____)
+//0x43: Disable Channels (____3210) 1 - disable, 0 - no change
+//0x44: Enable Channels (____3210) 1 - enable, 0 - no change
 //0x50: Ch0  (AAAABBBB)
 //0x51: Ch1
 //0x52: Ch2
 //0x53: Ch3
+
 //0x80: Invalid
 
 #include <msp430g2230.h>
@@ -37,7 +40,6 @@ volatile unsigned char i2cState = ADDRESS;
 volatile bool ack = false;
 
 inline void ACK() {
-  P1OUT ^= (1 << 5);
   USICTL0 |= USIOE;
   USISRL = 0;
   USICNT = 1;
@@ -45,8 +47,6 @@ inline void ACK() {
 }
 
 inline void NACK() {
-  P1OUT ^= (1 << 5);
-  P1OUT ^= (1 << 5);
   USICTL0 |= USIOE;
   USISRL = 0xFF;
   USICNT = 1;
@@ -56,7 +56,7 @@ inline void NACK() {
 }
 
 __attribute__((interrupt(USI_VECTOR))) void i2cInterrupt() {
-  if (USICTL1 & USISTTIFG) // start condition for i2c. We should prepare for an address to be sent regardless of what should be happening now.
+  if (USICTL1 & USISTTIFG) // start condition for i2c. We should prepare for an address to be sent if nothing else is happening.
   { 
     USICTL1 &= ~(USISTTIFG);
     USICNT = 8; // 8 bits to read soon...
@@ -67,20 +67,12 @@ __attribute__((interrupt(USI_VECTOR))) void i2cInterrupt() {
   { 
     if (ack) { // We received an ACK/NACK...
       if (USISRL & 0x01) { // NACK (reset everything)
-        P1OUT ^= (1 << 5);
-        P1OUT ^= (1 << 5);
-        P1OUT ^= (1 << 5);
         currentReg = 0x80;
         USICTL0 &= ~(USIOE);
         USICNT = 8;
         i2cState = ADDRESS;
         ack = false;
       } else { // ACK (send next byte! The only reason for us to ever receive an ACK is if we're sending and it wants more data)
-        P1OUT ^= (1 << 5);
-        P1OUT ^= (1 << 5);
-        P1OUT ^= (1 << 5);
-        P1OUT ^= (1 << 5);
-        P1OUT ^= (1 << 5);
         USICTL0 |= USIOE; // enable output!
         USISRL = currentMsg[0];
         currentMsg++;
@@ -91,6 +83,9 @@ __attribute__((interrupt(USI_VECTOR))) void i2cInterrupt() {
     }
 
     if (i2cState == ADDRESS) { // If we just received an address... let's process it!
+      P1OUT ^= (1 << 5);
+      P1OUT ^= (1 << 5);
+      P1OUT ^= (1 << 5);
       if ((USISRL & 0xFE) == 0x02) {
         if (USISRL & 0x01) { // The ev3 wants to read something from us
           if (!(currentReg & 0x80)) {
@@ -99,14 +94,18 @@ __attribute__((interrupt(USI_VECTOR))) void i2cInterrupt() {
             return;
           }
         } else {
+          P1OUT ^= (1 << 5);
+          P1OUT ^= (1 << 5);
           if (currentReg & 0x80)
           {
             i2cState = REG;
             ACK();
             return;
           }
-          else if ((currentReg & 0xFC) == 0x50 || currentReg == 0x42)
+          else if ((currentReg & 0xFC) == 0x50 || currentReg == 0x42 || currentReg == 0x43 || currentReg == 0x44)
           {
+            P1OUT ^= (1 << 5);
+            P1OUT ^= (1 << 5);
             i2cState = WRITE;
             ACK();
             return;
@@ -118,8 +117,15 @@ __attribute__((interrupt(USI_VECTOR))) void i2cInterrupt() {
     }
 
     if (i2cState == REG) {
+      P1OUT ^= (1 << 5);
+      P1OUT ^= (1 << 5);
+      P1OUT ^= (1 << 5);
+      P1OUT ^= (1 << 5);
       i2cState = ADDRESS;
-      if ((USISRL == 0) || (USISRL == 0x08) || (USISRL == 0x10) || (USISRL == 0x42) || ((USISRL & 0xFC) == 0x50)) {
+      if ((USISRL == 0) || (USISRL == 0x08) || (USISRL == 0x10) || (USISRL == 0x42) || (USISRL == 0x43) || (USISRL == 0x44) || ((USISRL & 0xFC) == 0x50))
+      {
+        P1OUT ^= (1 << 5);
+        P1OUT ^= (1 << 5);
         currentReg = USISRL;
         ACK();
         return;
@@ -134,6 +140,19 @@ __attribute__((interrupt(USI_VECTOR))) void i2cInterrupt() {
         channelState = (channelState & 0x0F) | (USISRL & 0xF0);
         ACK();
         break;
+      case 0x43:
+        channelState &= ~((USISRL & 0x0F) << 4);
+        P1OUT ^= (1 << 5);
+        ACK();
+        break;
+      case 0x44:
+        channelState = channelState | ((USISRL & 0x0F) << 4);
+        P1OUT ^= (1 << 5);
+        for (unsigned char i = 0; i < USISRL; i++) {
+          P1OUT ^= (1 << 5);
+        }
+        ACK();
+        break;
       case 0x50:
       case 0x51:
       case 0x52:
@@ -145,6 +164,9 @@ __attribute__((interrupt(USI_VECTOR))) void i2cInterrupt() {
         NACK();
         break;
       }
+      i2cState = ADDRESS;
+      currentReg = 0x80;
+      return;
     }
 
     NACK();
@@ -152,19 +174,7 @@ __attribute__((interrupt(USI_VECTOR))) void i2cInterrupt() {
   }
   else if (ack)
   { // we just sent ACK/NACK. Check if we're supposed to start writing (READ state)
-    P1OUT ^= (1 << 5);
-    P1OUT ^= (1 << 5);
-    P1OUT ^= (1 << 5);
-    P1OUT ^= (1 << 5);
-    P1OUT ^= (1 << 5);
-    P1OUT ^= (1 << 5);
     if (i2cState != READ) {
-      P1OUT ^= (1 << 5);
-      P1OUT ^= (1 << 5);
-      P1OUT ^= (1 << 5);
-      P1OUT ^= (1 << 5);
-      P1OUT ^= (1 << 5);
-      P1OUT ^= (1 << 5);
       USICTL0 &= ~(USIOE);
       USICNT = 8;
       ack = false;
@@ -202,10 +212,6 @@ __attribute__((interrupt(USI_VECTOR))) void i2cInterrupt() {
   }
   else
   { // we just sent data... prepare to receive ACK/NACK
-    P1OUT ^= (1 << 5);
-    P1OUT ^= (1 << 5);
-    P1OUT ^= (1 << 5);
-    P1OUT ^= (1 << 5);
     USICTL0 &= ~(USIOE);
     USICNT = 1;
     ack = true;
